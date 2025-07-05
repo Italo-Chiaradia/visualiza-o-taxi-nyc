@@ -1,23 +1,404 @@
 <!DOCTYPE html>
-<html lang="en">
-
+<html lang="pt-br">
 <head>
     <meta charset="UTF-8">
-    <title>Carregamento dos Dados</title>
-    <link rel="stylesheet" href="index.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Análise Visual de Corridas de Táxi - NYC</title>
+    <style>
+        :root {
+            --primary-color: #4e79a7;
+            --secondary-color: #f28e2c;
+            --accent-color: #e15759;
+            --bg-color: #f0f2f5;
+            --font-color: #333;
+            --border-color: #ddd;
+            --shadow-color: rgba(0, 0, 0, 0.1);
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--font-color);
+            margin: 0;
+            padding: 1rem;
+        }
+        h1 {
+            text-align: center;
+            color: var(--primary-color);
+        }
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 1.5rem;
+            padding: 1rem;
+        }
+        .chart-container {
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px var(--shadow-color);
+            padding: 1.5rem;
+            transition: all 0.3s ease;
+        }
+        .chart-container:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 16px var(--shadow-color);
+        }
+        h2 {
+            margin-top: 0;
+            font-size: 1.2rem;
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 0.5rem;
+            color: var(--primary-color);
+        }
+        svg {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .bar {
+            fill: var(--primary-color);
+            transition: fill 0.2s ease-in-out;
+        }
+        .bar:hover, .bar.selected {
+            fill: var(--secondary-color);
+        }
+        .dot {
+            opacity: 0.7;
+            transition: fill 0.2s ease-in-out;
+        }
+        .axis-x path, .axis-y path {
+            stroke: #ccc;
+        }
+        .axis-x .tick line, .axis-y .tick line {
+            stroke: #eee;
+        }
+        .axis-x .tick text, .axis-y .tick text {
+            fill: #666;
+            font-size: 12px;
+        }
+        .brush .selection {
+            fill: var(--secondary-color);
+            fill-opacity: 0.3;
+            stroke: var(--secondary-color);
+        }
+        #loader {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+        }
+        .spinner {
+            border: 8px solid var(--bg-color);
+            border-top: 8px solid var(--primary-color);
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            animation: spin 1s linear infinite;
+        }
+        #loader p {
+            margin-top: 1rem;
+            font-size: 1.2rem;
+            color: var(--font-color);
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
 </head>
-
 <body>
-    <div class="main-container">
-        <svg>
-        </svg>
-        <div class="buttom-container">
-            <button id="loadBtn">Load Chart</button>
-            <button id="clearBtn">Clear Chart</button>
+
+    <div id="loader">
+        <div class="spinner"></div>
+        <p>Carregando e processando dados... Por favor, aguarde.</p>
+    </div>
+
+    <h1>Dashboard de Análise - Green Taxis NYC (2023)</h1>
+
+    <div class="dashboard">
+        <div class="chart-container">
+            <h2>Corridas por Hora do Dia</h2>
+            <svg id="histogram-chart"></svg>
+        </div>
+        <div class="chart-container">
+            <h2>Formas de Pagamento</h2>
+            <svg id="payment-chart"></svg>
+        </div>
+        <div class="chart-container" style="grid-column: 1 / -1;">
+            <h2>Distância vs. Valor Total da Corrida</h2>
+            <svg id="scatter-plot"></svg>
         </div>
     </div>
 
-    <script type="module" src="src/main.js"></script>
-</body>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script type="module">
+        import { Taxi } from './src/taxi.js';
 
+        // --- ESTADO GLOBAL DO DASHBOARD ---
+        const state = {
+            timeRange: null, // [startHour, endHour]
+            paymentType: null, // 1, 2, 3...
+        };
+
+        // --- INICIALIZAÇÃO ---
+        const taxi = new Taxi();
+        const loader = document.getElementById('loader');
+
+        async function main() {
+            await taxi.init();
+            await taxi.loadTaxi(2); 
+            loader.style.display = 'none';
+            await updateAllCharts();
+        }
+
+        main();
+
+        // --- FUNÇÃO DE ATUALIZAÇÃO GERAL ---
+        async function updateAllCharts() {
+            try {
+                await Promise.all([
+                    renderHistogram(),
+                    renderPaymentChart(),
+                    renderScatterPlot()
+                ]);
+            } catch (error) {
+                console.error("Erro ao atualizar os gráficos:", error);
+            }
+        }
+
+        // --- CONSTRUÇÃO DAS VISUALIZAÇÕES ---
+
+        // 1. HISTOGRAMA DE CORRIDAS POR HORA
+        async function renderHistogram() {
+            const whereClauses = [];
+            if (state.paymentType) {
+                whereClauses.push(`payment_type = ${state.paymentType}`);
+            }
+            const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+            const data = await taxi.query(`
+                SELECT EXTRACT(HOUR FROM lpep_pickup_datetime) AS hour, COUNT(*) AS count
+                FROM ${taxi.table}
+                ${whereSql}
+                GROUP BY hour
+                ORDER BY hour;
+            `);
+
+            data.forEach(d => {
+                d.count = Number(d.count);
+                d.hour = Number(d.hour);
+            });
+
+            const margin = { top: 20, right: 20, bottom: 50, left: 60 };
+            const width = 500 - margin.left - margin.right;
+            const height = 300 - margin.top - margin.bottom;
+
+            const svg = d3.select("#histogram-chart")
+                .attr("viewBox", `0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}`)
+                .html("")
+                .append("g")
+                .attr("transform", `translate(${margin.left},${margin.top})`);
+
+            const xScale = d3.scaleBand()
+                .domain(d3.range(24))
+                .range([0, width])
+                .padding(0.1);
+
+            const yScale = d3.scaleLinear()
+                .domain([0, d3.max(data, d => d.count) || 1]) // Fallback para evitar domínio inválido
+                .nice()
+                .range([height, 0]);
+
+            svg.append("g")
+                .attr("transform", `translate(0, ${height})`)
+                .call(d3.axisBottom(xScale).tickValues(d3.range(0, 25, 2)))
+                .append("text")
+                .attr("x", width / 2).attr("y", 40).attr("fill", "#000").attr("text-anchor", "middle").text("Hora do Dia");
+
+            svg.append("g")
+                .call(d3.axisLeft(yScale))
+                .append("text")
+                .attr("transform", "rotate(-90)").attr("y", -45).attr("x", -height/2).attr("fill", "#000").attr("text-anchor", "middle").text("Nº de Corridas");
+
+            svg.selectAll(".bar")
+                .data(data)
+                .join("rect")
+                .attr("class", "bar")
+                .attr("x", d => xScale(d.hour))
+                .attr("y", d => yScale(d.count))
+                .attr("width", xScale.bandwidth())
+                .attr("height", d => height - yScale(d.count));
+
+            const brush = d3.brushX()
+                .extent([[0, 0], [width, height]])
+                .on("end", async function(event) {
+                    if (!event.sourceEvent) return;
+
+                    let newTimeRange = null;
+                    if (event.selection) {
+                        const [x0, x1] = event.selection;
+                        const step = xScale.step();
+                        const startHour = Math.floor(x0 / step);
+                        const endHour = Math.floor(x1 / step);
+                        const clampedStart = Math.max(0, startHour);
+                        const clampedEnd = Math.min(23, endHour);
+
+                        if (clampedStart <= clampedEnd) {
+                            newTimeRange = [clampedStart, clampedEnd];
+                        }
+                    }
+
+                    if (JSON.stringify(state.timeRange) !== JSON.stringify(newTimeRange)) {
+                        state.timeRange = newTimeRange;
+                        await updateAllCharts();
+                    }
+                });
+            
+            const brushGroup = svg.append("g").attr("class", "brush").call(brush);
+
+            if (state.timeRange) {
+                const [startHour, endHour] = state.timeRange;
+                const x0 = xScale(startHour);
+                const x1 = xScale(endHour) + xScale.bandwidth();
+                brushGroup.call(brush.move, [x0, x1]);
+            }
+        }
+
+        // 2. GRÁFICO DE BARRAS DE PAGAMENTO
+        async function renderPaymentChart() {
+             const whereClauses = [];
+            if (state.timeRange) {
+                 const [startHour, endHour] = state.timeRange;
+                 whereClauses.push(`EXTRACT(HOUR FROM lpep_pickup_datetime) BETWEEN ${startHour} AND ${endHour}`);
+            }
+            const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+            const paymentTypes = {1: 'Cartão', 2: 'Dinheiro', 3: 'Gratuito', 4: 'Disputa', 5: 'Outro'};
+            const data = await taxi.query(`
+                SELECT payment_type, COUNT(*) as count 
+                FROM ${taxi.table} 
+                ${whereSql}
+                GROUP BY payment_type
+            `);
+            
+            data.forEach(d => {
+                d.count = Number(d.count);
+                d.label = paymentTypes[d.payment_type] || 'Desconhecido';
+            });
+
+            const margin = { top: 20, right: 20, bottom: 50, left: 60 };
+            const width = 500 - margin.left - margin.right;
+            const height = 300 - margin.top - margin.bottom;
+
+            const svg = d3.select("#payment-chart")
+                .attr("viewBox", `0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}`)
+                .html("")
+                .append("g")
+                .attr("transform", `translate(${margin.left},${margin.top})`);
+            
+            const xScale = d3.scaleBand()
+                .domain(data.map(d => d.label).sort())
+                .range([0, width])
+                .padding(0.2);
+            
+            const yScale = d3.scaleLinear()
+                .domain([0, d3.max(data, d => d.count) || 1]) // Fallback
+                .nice()
+                .range([height, 0]);
+
+            svg.append("g")
+                .attr("transform", `translate(0, ${height})`)
+                .call(d3.axisBottom(xScale));
+
+            svg.append("g").call(d3.axisLeft(yScale));
+
+            svg.selectAll(".bar")
+                .data(data)
+                .join("rect")
+                .attr("class", "bar")
+                .classed("selected", d => d.payment_type === state.paymentType)
+                .attr("x", d => xScale(d.label))
+                .attr("y", d => yScale(d.count))
+                .attr("width", xScale.bandwidth())
+                .attr("height", d => height - yScale(d.count))
+                .on("click", async (event, d) => {
+                    state.paymentType = state.paymentType === d.payment_type ? null : d.payment_type;
+                    await updateAllCharts();
+                });
+        }
+
+        // 3. GRÁFICO DE DISPERSÃO
+        async function renderScatterPlot() {
+            const whereClauses = [
+                'trip_distance > 0 AND trip_distance < 50',
+                'total_amount > 0 AND total_amount < 200'
+            ];
+            if (state.timeRange) {
+                 const [startHour, endHour] = state.timeRange;
+                 whereClauses.push(`EXTRACT(HOUR FROM lpep_pickup_datetime) BETWEEN ${startHour} AND ${endHour}`);
+            }
+            if (state.paymentType) {
+                whereClauses.push(`payment_type = ${state.paymentType}`);
+            }
+            const whereSql = `WHERE ${whereClauses.join(' AND ')}`;
+
+            // CORREÇÃO: Substituído TABLESAMPLE por ORDER BY random() LIMIT para maior compatibilidade.
+            const data = await taxi.query(`
+                SELECT trip_distance, total_amount, payment_type 
+                FROM ${taxi.table}
+                ${whereSql}
+                ORDER BY random()
+                LIMIT 5000;
+            `);
+
+            const margin = { top: 20, right: 20, bottom: 50, left: 60 };
+            const width = 1000 - margin.left - margin.right;
+            const height = 400 - margin.top - margin.bottom;
+
+            const svg = d3.select("#scatter-plot")
+                .attr("viewBox", `0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}`)
+                .html("")
+                .append("g")
+                .attr("transform", `translate(${margin.left},${margin.top})`);
+
+            const xScale = d3.scaleLinear()
+                .domain([0, d3.max(data, d => d.trip_distance) || 10]).nice()
+                .range([0, width]);
+
+            const yScale = d3.scaleLinear()
+                .domain([0, d3.max(data, d => d.total_amount) || 50]).nice()
+                .range([height, 0]);
+            
+            const colorScale = d3.scaleOrdinal(d3.schemeCategory10)
+                .domain([1, 2, 3, 4, 5]);
+
+            svg.append("g")
+                .attr("transform", `translate(0, ${height})`)
+                .call(d3.axisBottom(xScale))
+                .append("text")
+                .attr("x", width / 2).attr("y", 40).attr("fill", "#000").attr("text-anchor", "middle").text("Distância da Corrida (milhas)");
+
+            svg.append("g")
+                .call(d3.axisLeft(yScale))
+                .append("text")
+                .attr("transform", "rotate(-90)").attr("y", -45).attr("x", -height/2).attr("fill", "#000").attr("text-anchor", "middle").text("Valor Total (USD)");
+
+            svg.selectAll(".dot")
+                .data(data)
+                .join("circle")
+                .attr("class", "dot")
+                .attr("cx", d => xScale(d.trip_distance))
+                .attr("cy", d => yScale(d.total_amount))
+                .attr("r", 3)
+                .style("fill", d => colorScale(d.payment_type));
+        }
+
+    </script>
+</body>
 </html>
